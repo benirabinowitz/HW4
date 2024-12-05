@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
@@ -27,12 +28,12 @@ class MLPPlanner(nn.Module):
         input_size = n_track * 2 * 2
 
         self.mlp = nn.Sequential(
-            nn.Linear(input_size, 256),
-            nn.BatchNorm1d(256),
+            nn.Linear(input_size, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.2),
             
-            nn.Linear(256, 256),
+            nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.2),
@@ -40,14 +41,8 @@ class MLPPlanner(nn.Module):
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.1),
             
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            
-            nn.Linear(64, n_waypoints * 2)
+            nn.Linear(128, n_waypoints * 2)
         )
 
     def forward(
@@ -70,20 +65,12 @@ class MLPPlanner(nn.Module):
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
         batch_size = track_left.shape[0]
-
-        x_left = track_left.reshape(batch_size, -1)
-        x_right = track_right.reshape(batch_size, -1)
-        x = torch.cat([x_left, x_right], dim=1)
-
+        x = torch.cat([track_left.reshape(batch_size, -1), track_right.reshape(batch_size, -1)], dim=1)
         x = self.mlp(x)
-
         return x.reshape(batch_size, self.n_waypoints, 2)
 
 
 class TransformerPlanner(torch.nn.Module):
-    """
-    Transformer-based planner
-    """
     def __init__(
         self,
         n_waypoints: int = 3,
@@ -98,6 +85,16 @@ class TransformerPlanner(torch.nn.Module):
         self.track_features = track_features
         self.hidden_size = hidden_size
 
+        self.mlp = nn.Sequential(
+            nn.Linear(track_features * 20, 512),  # 20 = n_track * 2
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, n_waypoints)
+        )
         self.input_proj = nn.Linear(track_features, hidden_size)
         
         encoder_layer = nn.TransformerEncoderLayer(
@@ -109,31 +106,21 @@ class TransformerPlanner(torch.nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        self.output_proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, n_waypoints * 2)
-        )
+        self.longitudinal_head = nn.Linear(hidden_size, n_waypoints)
 
     def forward(self, track_left, track_right, **kwargs) -> torch.Tensor:
         batch_size = track_left.shape[0]
+        x_mlp = torch.cat([track_left.reshape(batch_size, -1), track_right.reshape(batch_size, -1)], dim=1)
+        lateral = self.mlp(x_mlp)
         
-        # Combine left and right tracks
-        x = torch.stack([track_left, track_right], dim=1)
-        x = x.reshape(batch_size, -1, self.track_features)
+        x_trans = torch.cat([track_left, track_right], dim=1)
+        x_trans = self.input_proj(x_trans)
+        x_trans = self.transformer(x_trans)
+        x_trans = x_trans.mean(dim=1)
+        longitudinal = self.longitudinal_head(x_trans)
         
-        # Project to hidden dimension
-        x = self.input_proj(x)
-        
-        # Apply transformer
-        x = self.transformer(x)
-        
-        # Global average pooling
-        x = x.mean(dim=1)
-        
-        # Project to waypoints
-        x = self.output_proj(x)
-        return x.reshape(-1, self.n_waypoints, 2)
+        output = torch.stack([lateral, longitudinal], dim=-1)
+        return output
 
 
 class CNNPlanner(torch.nn.Module):

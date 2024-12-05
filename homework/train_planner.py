@@ -98,7 +98,7 @@ def main(args):
     print(f"Created model: {args.model}")
     
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
     
     best_val_loss = float('inf')
